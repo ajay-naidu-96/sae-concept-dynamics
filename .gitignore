@@ -35,3 +35,13 @@ venv/
 # Logs
 *.log
 notebook_logs.txt
+logs/
+src/logs/
+logs_*
+
+# Data
+data/
+src/Data
+
+*.csv
+*.pkl
