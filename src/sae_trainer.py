@@ -102,7 +102,7 @@ def create_argparser():
                         help="List of hidden dimension sizes (number of concepts) to train.")
     parser.add_argument('--l1_penalties', type=float, nargs='+',
                         help="List of L1 penalty coefficients (for vanilla SAE).")
-    parser.add_argument('--top_k_ratios', type=float, nargs='+', default=[0.02, 0.05, 0.1, 0.2, 0.5],
+    parser.add_argument('--top_k_ratios', type=float, nargs='+', default=[0.02, 0.05, 0.1, 0.2, 0.5, 0.75, 0.95],
                         help="List of top-k ratios for activation (for top_k SAE).")
 
     return parser
