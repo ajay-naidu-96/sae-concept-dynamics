@@ -2,141 +2,156 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 import argparse
-from utils import add_dict_to_argparser
+from script_utils.utils import add_dict_to_argparser
 import os
 import pandas as pd
-from metrics_calc import extract_purity_scores
-from logistic_regression_classifier import evaluate_sae_activations, evaluate_per_neuron, evaluate_per_neuron_1vsall
+from metrics.metrics_calc import extract_purity_scores
+from metrics.logistic_regression_classifier import evaluate_sae_activations, evaluate_per_neuron, evaluate_per_neuron_1vsall_new
+from metrics.sae_stable_rank import evaluate_sae_stable_rank
+from metrics.concept_path import ConceptPathExtractor
 import pickle
-
-def results_to_dataframe(all_results, save_path=None):
-
-    records = []
-    for sae_name, results in all_results.items():
-        record = {
-            'SAE_Name': sae_name,
-            'Train_Accuracy': results['train_accuracy'],
-            'Test_Accuracy': results['test_accuracy'],
-            'CV_Mean': results['cv_mean'],
-            'CV_Std': results['cv_std'],
-            'N_Features': results['n_features'],
-            'N_Samples': results['n_samples']
-        }
-        records.append(record)
-    
-    df = pd.DataFrame(records)
-    
-    df = df.sort_values('Test_Accuracy', ascending=False).reset_index(drop=True)
-    
-    df['Rank'] = df.index + 1
-    
-    column_order = ['Rank', 'SAE_Name', 'Test_Accuracy', 'CV_Mean', 'CV_Std', 
-                   'Train_Accuracy', 'N_Features', 'N_Samples']
-
-    df = df[column_order]
-    
-    numerical_cols = ['Test_Accuracy', 'CV_Mean', 'CV_Std', 'Train_Accuracy']
-    df[numerical_cols] = df[numerical_cols].round(4)
-    
-    if save_path:
-        df.to_csv(save_path, index=False)
-        print(f"\nResults saved to: {save_path}")
+from script_utils.loader import create_dataloader_with_labels
+import glob
 
 def main():
 
     args = create_argparser().parse_args()
     device = torch.device("cuda")
 
-    ckpt = torch.load(args.data_dir)
+    dataloader = create_dataloader_with_labels(
+                    args.data_dir, 
+                    device, 
+                    args.batch_size)
 
-    fc1 = ckpt["fc1"]
-    fc1_activations = ckpt["fc1_activations"]
-    labels = ckpt["labels"]
+    # all_results = {}
+    all_stable_rank_results = {}
+    # all_concept_paths = {}
 
-    dataloader = torch.utils.data.DataLoader(TensorDataset(fc1), batch_size=1024, shuffle=False)
-    all_results = {}
+    os.makedirs(args.log_dir, exist_ok=True)
 
-    for model_flavor in os.listdir(args.log_dir):
+    for i, model_flavor in enumerate(os.listdir(args.log_dir)):
         
-        if model_flavor.endswith('.pt'):
+        if not os.path.isdir(os.path.join(args.log_dir, model_flavor)):
             continue
 
         best_loss = os.path.join(args.log_dir, model_flavor, "best_loss.pth")
-        best_both = os.path.join(args.log_dir, model_flavor, "best_both.pth")
 
-        dead_ones = [model_type for model_type in os.listdir(os.path.join(args.log_dir, model_flavor)) if model_type.startswith("best_dead")]
+        if not os.path.isfile(best_loss):
+            continue
 
-        sorted(dead_ones)
-
-        best_dead = os.path.join(args.log_dir, model_flavor, dead_ones[-1])
-
-        model_paths = [best_loss, best_both, best_dead]
+        model_paths = [best_loss]
 
         for each_path in model_paths:
             
             sae_name = each_path.split('/')[-2] + "_" + each_path.split('/')[-1].split('.')[0]
 
-            sae = torch.load(each_path)
-            sae.to(device)
+            print(f"Loading: {model_flavor}, {sae_name}")
+
+            sae = torch.load(each_path, map_location=device)
             sae.eval()
 
+            concept_paths_dir = os.path.join(args.log_dir, model_flavor, "concept_paths")
+            os.makedirs(concept_paths_dir, exist_ok=True)
+
+            # Collect all activations and labels from the dataloader
+            all_activations = []
+            all_labels = []
+            
             with torch.no_grad():
+                for batch_data in dataloader:
+                    if len(batch_data) == 2:
+                        fc1_batch, labels_batch = batch_data
+                    else:
+                        # If dataloader only returns activations
+                        fc1_batch = batch_data[0]
+                        labels_batch = None
+                    
+                    pre_codes, codes = sae.encode(fc1_batch)
+                    all_activations.append(codes.cpu())
+                    
+                    if labels_batch is not None:
+                        all_labels.append(labels_batch.cpu())
 
-                pre_codes, codes = sae.encode(fc1.to(device))
-                activations = codes.cpu()
+                # Concatenate all batches
+                activations = torch.cat(all_activations, dim=0)
+                if all_labels:
+                    labels = torch.cat(all_labels, dim=0)
+                else:
+                    If no labels available, you might need to handle this case
+                    depending on your data structure
+                    labels = None
 
-                results = evaluate_per_neuron_1vsall(activations, labels.cpu(), sae_name)
-                all_results[sae_name] = results
-    
-    # results_to_dataframe(all_results, 'sae_lr_results_per_neuron.csv')
-    output_path = os.path.join(args.log_dir, "all_results_vanilla_sae.pkl")
-    with open(output_path, "wb") as f:
-        pickle.dump(all_results, f)
-    
-    # results = []
+                concept_paths_configs = [
+                    {'method': 'top_k', 'value': 10, 'min_act': 0.1},
+                    {'method': 'top_k', 'value': 20, 'min_act': 0.1},
+                    {'method': 'percentile', 'value': 90, 'min_act': 0.1},
+                    {'method': 'std_threshold', 'value': 1.5, 'min_act': 0.1}
+                ]
 
-    # for idx, model_name in enumerate(os.listdir(args.log_dir)):
+                if labels is not None:
+                    results = evaluate_per_neuron_1vsall_new(activations, labels, sae_name)
+                    all_results[sae_name] = results
+                else:
+                    print(f"Warning: No labels found for {sae_name}, skipping evaluation")
 
-    #     print(f"Running: {idx}, {model_name}")
+                stable_rank_results = evaluate_sae_stable_rank(
+                    sae, 
+                    sae_name,
+                    thresholds=[0.001, 0.01, 0.05, 0.1], 
+                    include_both_matrices=True, 
+                    use_frobenius_definition = True
+                )
+                
+                all_stable_rank_results[sae_name] = stable_rank_results
 
-    #     checkpoint = torch.load(args.log_dir+model_name)
+                sae_concept_paths = {}
+                
+                for config in concept_paths_configs:
+                    config_name = f"{config['method']}_{config['value']}"
+                    print(f"Extracting concept paths with {config_name}...")
+                    
+                    extractor = ConceptPathExtractor(
+                        threshold_method=config['method'],
+                        threshold_value=config['value'],
+                        min_activation=config['min_act']
+                    )
+                    
+                    concept_paths_data = extractor.extract_concept_paths(
+                        activations, labels, f"{sae_name}_{config_name}"
+                    )
+                    
+                    # Save individual config results
+                    save_path = os.path.join(concept_paths_dir, f"{sae_name}_{config_name}.pkl")
+                    extractor.save_concept_paths(concept_paths_data, save_path)
+                    
+                    # Analyze concept overlap between classes
+                    overlap_analysis = extractor.analyze_concept_overlap(concept_paths_data)
+                    concept_paths_data['overlap_analysis'] = overlap_analysis
+                    
+                    sae_concept_paths[config_name] = concept_paths_data
+                    
+                    print(f"  Extracted {len(concept_paths_data['concept_paths'])} concept paths")
+                    print(f"  Mean active neurons: {concept_paths_data['summary']['mean_active_neurons']:.2f}")
+                    print(f"  Total unique neurons used: {concept_paths_data['summary']['total_unique_neurons_used']}")
+                
+                all_concept_paths[sae_name] = sae_concept_paths
 
-    #     sae = checkpoint['full_model']
-        
-    #     sae.to(device)
-    #     sae = sae.eval()
+            del sae, activations, all_activations
 
-    #     with torch.no_grad():
-    #         pre_codes, codes = sae.encode(fc1.to(device))
-            
-    #         activations = codes.cpu()
-            
-    #         res = extract_purity_scores(activations, labels)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-    #         res['reanimate'] = 1 if "reanimate" in model_name else 0
+        output_path = os.path.join(args.log_dir, args.output_path)
 
-    #         if model_name.startswith("top_k_sae"):
-    #             res['model_name'] = "top_k_sae"
-    #             res['nb_concepts'] = model_name.split('.')[0].split('_')[-2]
-    #             res['top_k'] = model_name.split('.')[0].split('_')[-1]
-    #         elif model_name.startswith("batch_top_k"):
-    #             res['model_name'] = "batch_top_k"
-    #             res['nb_concepts'] = model_name.split('.')[0].split('_')[-3]
-    #             res['top_k'] = model_name.split('.')[0].split('_')[-2]
-
-    #         res['avg_final_loss'] = checkpoint['logs']['avg_loss'][-1]
-    #         res['final_dead_features'] = checkpoint['logs']['dead_features'][-1]
-
-    #         results.append(res)
-
-    # df_res = pd.DataFrame(results)
-    # df_res.to_csv("results_norm.csv")
+        with open(output_path, "wb") as f:
+            pickle.dump(all_results, f)
 
 def create_argparser():
 
     defaults = dict(
         data_dir="./logs/activation.pt",
-        log_dir= "./logs_vanilla_sae_/",
+        log_dir= "./logs_topk_sae_/",
+        output_path="concept_path_results.pkl",
         batch_size=1024
     )
 

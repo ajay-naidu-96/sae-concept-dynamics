@@ -3,9 +3,54 @@ from overcomplete.sae.base import SAE
 from overcomplete.sae import TopKSAE, BatchTopKSAE, train_sae
 from functools import partial
 import torch
+import torch.nn as nn
 import os
+import numpy as np
+import random
+from collections import defaultdict
 
-def vanilla_sae_trainer(input_dim, args, res, dataloader, penalties, reanim=False):
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def vanilla_sae_rand(input_dim, args):
+    init_methods = {
+        "xavier": lambda m: torch.nn.init.xavier_uniform_(m.weight),
+        "kaiming": lambda m: torch.nn.init.kaiming_uniform_(m.weight, nonlinearity="relu"),
+        "orthogonal": lambda m: torch.nn.init.orthogonal_(m.weight)
+    }
+
+    for init_name, init_func in init_methods.items():
+        seed = args.seed + hash(init_name) % 1000  # unique, reproducible seed per init
+        set_seed(seed)
+
+        for nb_concepts in args.nb_concepts_list:
+            sae = SAE(input_dim, nb_concepts=nb_concepts, device=args.device)
+
+            def init_weights(m):
+                if isinstance(m, nn.Linear):
+                    init_func(m)
+                    if m.bias is not None:
+                        torch.nn.init.zeros_(m.bias)
+
+            sae.apply(init_weights)
+
+            expt_name = f"{init_name}_sae_{nb_concepts}_seed{seed}"
+            os.makedirs(args.log_dir, exist_ok=True)
+            model_save_path = os.path.join(args.log_dir, expt_name + ".pt")
+            torch.save(sae, model_save_path)
+
+            print(f"[{init_name}] Saved SAE with {nb_concepts} concepts (seed={seed}) → {model_save_path}")
+
+
+def vanilla_sae_trainer(input_dim, args, res, dataloader, penalties, 
+                        reanim=False):
 
     for nb_concepts in args.nb_concepts_list:
 
@@ -21,7 +66,7 @@ def vanilla_sae_trainer(input_dim, args, res, dataloader, penalties, reanim=Fals
                 criterion_fn = partial(mse_l1_criterion, l1_coefficient=pen)
 
             sae = SAE(input_dim, nb_concepts=nb_concepts, device=args.device)
-
+                
             optimizer = torch.optim.Adam(sae.parameters(), lr=args.lr)
 
             expt_name = expt_name + f"vanilla_sae_{nb_concepts}_{i}"

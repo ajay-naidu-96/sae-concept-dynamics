@@ -30,20 +30,41 @@ def add_dict_to_argparser(parser, default_dict):
 
 def create_argparser():
 
-    defaults = dict(
-        data_dir="./Data/",
-        lr=1e-4,
-        batch_size=256, 
-        seed=42, 
-        name="mnist", 
-        log_dir="./logs/",
-        epochs=25
-    )
-
     parser = argparse.ArgumentParser()
-    add_dict_to_argparser(parser, defaults)
 
-    return parser
+    parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10", "vit"], default="mnist")
+
+    parser.add_argument("--data_dir", type=str, default="./Data/")
+    parser.add_argument("--log_dir", type=str, default="./logs/")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--name", type=str, default="experiment")
+
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+
+    args = parser.parse_args()
+
+    if args.dataset == "mnist":
+        args.lr = args.lr or 5e-3
+        args.batch_size = args.batch_size or 256
+        args.epochs = args.epochs or 25
+        args.name = args.name if args.name != "experiment" else "mnist"
+        
+    elif args.dataset == "cifar10":
+        args.lr = args.lr or 1e-1
+        args.batch_size = args.batch_size or 256
+        args.epochs = args.epochs or 125
+        args.name = args.name if args.name != "experiment" else "cifar10"
+
+    elif args.dataset == "vit":
+        args.lr = args.lr or 1e-1
+        args.batch_size = args.batch_size or 8
+        args.epochs = args.epochs or 50
+        args.name = args.name if args.name != "experiment" else "ViTcifar10"
+
+
+    return args
 
 
 def set_seed(seed=42):

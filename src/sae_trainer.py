@@ -3,8 +3,10 @@ from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import argparse
 import os
-from script_utils.model_trainer import vanilla_sae_trainer, top_k_trainer
-
+from script_utils.model_trainer import vanilla_sae_trainer, top_k_trainer, vanilla_sae_rand
+from script_utils.loader import create_dataloader_from_chunks
+from script_utils.utils import set_seed
+import glob
 
 def main():
 
@@ -19,26 +21,22 @@ def main():
 
     print(f"Loading data from {args.data_dir}...")
 
-    try:
-        ckpt = torch.load(args.data_dir, map_location=args.device)
-        activations = ckpt.get("fc1_activations_norm", ckpt.get("fc1"))
+    set_seed(args.seed)
 
-        if activations is None:
-            raise KeyError("Data file must contain 'fc1' or 'fc1_activations_norm' key.")
+    dataloader = create_dataloader_from_chunks(
+                    args.data_dir, 
+                    device, 
+                    args.batch_size)
 
-    except FileNotFoundError:
-        print(f"Error: Data file not found at {args.data_dir}")
-        return
+    first_chunk = sorted(glob.glob(os.path.join(args.data_dir, "*.pt")))[0]
+    ckpt = torch.load(first_chunk, map_location=device)
+    sample_activations = ckpt.get("fc1_activations_norm", ckpt.get("fc1"))
+    input_dim = sample_activations.shape[-1]
 
-    except KeyError as e:
-        print(f"Error: {e}")
-        return
-
-    dataloader = DataLoader(TensorDataset(activations), batch_size=args.batch_size, shuffle=True)
+    print(f"Input dimension: {input_dim}")
     print("Data loaded successfully.")
 
     results = {}
-    input_dim = activations.shape[-1]
 
     trainer_kwargs = {
         'input_dim': input_dim,
@@ -50,6 +48,12 @@ def main():
 
     trainer_func = None
 
+    if args.sae_type == 'random':
+        print("Saving randomly initialized SAE's")
+        vanilla_sae_rand(input_dim, args)
+
+        return 
+
     if args.sae_type == 'vanilla':
         print("Training Vanilla SAE...")
         trainer_func = vanilla_sae_trainer
@@ -57,9 +61,14 @@ def main():
             penalties_dict = {str(c): args.l1_penalties for c in args.nb_concepts_list}
         else:
             print("No L1 penalties provided via --l1_penalties, using default logspace penalties.")
+            '''
+                str(c): [round(val, 6) for val in np.logspace(-5, 0, num=20)] # 1e-5 up to 1
+                str(c): [round(val, 6) for val in np.logspace(-5, 1, num=30)] # 1e−5 up to 10.
+                str(c): [round(val, 6) for val in np.logspace(-4, 2, num=30)] # 1e−4 up to 100.
+            '''
+
             penalties_dict = {
-                str(c): [round(val, 6) for val in np.logspace(-5, 0, num=20)]
-                for c in args.nb_concepts_list
+                str(c): [round(val, 6) for val in np.logspace(-5, 1, num=30)] for c in args.nb_concepts_list
             }
         trainer_kwargs['penalties'] = penalties_dict
 
@@ -85,7 +94,7 @@ def main():
 def create_argparser():
     parser = argparse.ArgumentParser(description="Train a Sparse Autoencoder.")
     
-    parser.add_argument('--sae_type', type=str, required=True, choices=['vanilla', 'top_k'],
+    parser.add_argument('--sae_type', type=str, required=True, choices=['vanilla', 'top_k', 'random'],
                         help="The type of SAE to train.")
     parser.add_argument('--data_dir', type=str, default="./logs/train_activation.pt",
                         help="Path to the file containing the input activations.")
@@ -102,8 +111,11 @@ def create_argparser():
                         help="List of hidden dimension sizes (number of concepts) to train.")
     parser.add_argument('--l1_penalties', type=float, nargs='+',
                         help="List of L1 penalty coefficients (for vanilla SAE).")
-    parser.add_argument('--top_k_ratios', type=float, nargs='+', default=[0.02, 0.05, 0.1, 0.2, 0.5, 0.75, 0.95],
+    parser.add_argument('--top_k_ratios', type=float, nargs='+', default = [ 0.01, 0.02, 0.03, 0.04, 0.05, 0.07, 0.09, 0.12, 0.15, 0.18, 0.22, 
+                                                                            0.26, 0.32, 0.38, 0.45, 0.55, 0.66, 0.78, 0.87, 0.96],
                         help="List of top-k ratios for activation (for top_k SAE).")
+    parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility.")
+
 
     return parser
 
